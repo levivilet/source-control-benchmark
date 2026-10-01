@@ -79,7 +79,7 @@ def trial(editor, number, snapshot):
     if editor['id'] == 'vscode':
         command += ['--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust', '--new-window']
     if editor['id'] == 'atom':
-        command += ['--new-window', '--foreground']
+        command += ['--new-window', '--foreground', '--in-process-gpu']
     command.append(str(FIXTURE))
     modules = FIXTURE / 'node_modules'
     if modules.exists():
@@ -100,19 +100,33 @@ def trial(editor, number, snapshot):
             process = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
         page = Page(port)
         deadline = time.monotonic() + 60
-        while not page.evaluate("document.readyState === 'complete'"):
-            if time.monotonic() >= deadline:
-                raise TimeoutError('Editor page not ready')
-            time.sleep(.25)
+        # document.readyState precedes workbench initialization in these editors.
+        # Wait for actual controls and use native pointer/key events.
         if editor['id'] == 'atom':
-            page.evaluate("atom.commands.dispatch(atom.views.getView(atom.workspace), 'github:toggle-git-tab')")
+            while not page.evaluate("!!document.querySelector('atom-workspace .tree-view .project-root')"):
+                if process.poll() is not None:
+                    raise RuntimeError('Atom exited before opening the fixture')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Atom did not open the fixture project')
+                time.sleep(.25)
+            page.key('9', 'Digit9', 2)
         else:
-            page.key('g', 'KeyG', 10)  # Control + Shift
+            selector = ('[role="tab"][aria-label^="Source Control"]' if editor['id'] == 'vscode'
+                        else '.ActivityBarItem[title="Source Control"]')
+            while not page.click(selector):
+                if process.poll() is not None:
+                    raise RuntimeError('Editor exited before workbench readiness')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Source-control activity item did not become available')
+                time.sleep(.25)
         initial = Completion(0, time.monotonic())
         while True:
             active, statuses, errors, count = trace_state(trace)
+            ready = page.evaluate(STATE[editor['id']])
+            observations.append({'phase': 'baseline', 'ready': ready, 'activeGit': len(active),
+                                 'statuses': statuses, 'traceLines': count})
             if initial.observe(time.monotonic(), alive=process.poll() is None,
-                               ready=page.evaluate(STATE[editor['id']]), active=active,
+                               ready=ready, active=active,
                                statuses=statuses, errors=errors, count=count):
                 break
             time.sleep(.25)

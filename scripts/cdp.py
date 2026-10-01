@@ -40,7 +40,21 @@ class Page:
 
     def key(self, key, code, modifiers=0):
         for kind in ['keyDown', 'keyUp']:
-            self.call('Input.dispatchKeyEvent', type=kind, key=key, code=code, modifiers=modifiers)
+            self.call('Input.dispatchKeyEvent', type=kind, key=key, code=code, modifiers=modifiers,
+                      windowsVirtualKeyCode=ord(key.upper()), nativeVirtualKeyCode=ord(key.upper()))
+
+    def click(self, selector):
+        point = self.evaluate("""(() => {
+          const element = document.querySelector(%s);
+          if (!element || !element.offsetHeight) return null;
+          const box = element.getBoundingClientRect();
+          return {x: box.x + box.width / 2, y: box.y + box.height / 2};
+        })()""" % json.dumps(selector))
+        if not point:
+            return False
+        for kind in ['mousePressed', 'mouseReleased']:
+            self.call('Input.dispatchMouseEvent', type=kind, button='left', clickCount=1, **point)
+        return True
 
     def screenshot(self, path):
         path.write_bytes(base64.b64decode(self.call('Page.captureScreenshot')['data']))
