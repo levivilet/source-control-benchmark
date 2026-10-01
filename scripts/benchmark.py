@@ -129,10 +129,19 @@ def trial(editor, number, snapshot):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('LVCE workspace did not initialize Git')
                 time.sleep(.25)
+            # Record setup-only input delivery for CI navigation diagnostics.
+            page.evaluate("""window.benchmarkKeys = [];
+                window.benchmarkKeyListener = event => window.benchmarkKeys.push({
+                    key: event.key, code: event.code, ctrl: event.ctrlKey,
+                    shift: event.shiftKey, target: event.target.tagName});
+                window.addEventListener('keydown', window.benchmarkKeyListener, true);""")
+            navigation = []
             # Git initialization can precede keyboard routing/initial layout restore.
             # Reissue this idempotent focus command only during setup, and stop as
             # soon as the SCM view exists. Never send it during measurement.
             for attempt in range(3):
+                navigation.append({'attempt': attempt, 'beforeFocus': page.evaluate('document.hasFocus()')})
+                page.call('Page.bringToFront')
                 page.key('g', 'KeyG', 10)
                 opened = False
                 for _ in range(20):
@@ -144,6 +153,14 @@ def trial(editor, number, snapshot):
                     time.sleep(.25)
                 if opened:
                     break
+            navigation.append(page.evaluate("""({
+                focused: document.hasFocus(), events: window.benchmarkKeys,
+                activeElement: document.activeElement.tagName,
+                opened: !!document.querySelector('.SourceControl textarea')
+            })"""))
+            (output / 'navigation.json').write_text(json.dumps(navigation, indent=2))
+            page.evaluate("""window.removeEventListener('keydown', window.benchmarkKeyListener, true);
+                delete window.benchmarkKeyListener; delete window.benchmarkKeys;""")
             if not opened:
                 raise TimeoutError('LVCE source-control view did not open')
         else:
