@@ -1,0 +1,104 @@
+name: Source-control benchmark
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: source-control-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    name: Protocol tests
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -m unittest discover -s tests
+  benchmark:
+    name: Benchmark (${{ matrix.editor }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        editor: [vscode, lvce, atom]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.18.0'
+      - name: Install build and desktop prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv make g++ pkg-config git curl xz-utils \
+            libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev \
+            xvfb xauth openbox libgtk-3-0 libnss3 libgbm1 libxss1 libxtst6 \
+            libxkbcommon-x11-0 libasound2t64
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+      - name: Install checksum-pinned editor
+        run: .venv/bin/python scripts/install.py --editors '${{ matrix.editor }}'
+      - name: Clone pinned VS Code and install all dependencies
+        run: .venv/bin/python scripts/prepare.py
+      - name: Measure real editor
+        run: |
+          repeats=3
+          if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi
+          xvfb-run -a bash -c 'openbox >/dev/null 2>&1 & exec .venv/bin/python scripts/benchmark.py --editor "$1" --repeats "$2"' _ '${{ matrix.editor }}' "$repeats"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: source-control-${{ matrix.editor }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
+  report:
+    name: Validate report
+    needs: [test, benchmark]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require all editors and protocol tests
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+        run: test "$TEST_RESULT" = success && test "$BENCHMARK_RESULT" = success
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: source-control-*
+          path: results
+          merge-multiple: true
+      - name: Build validated report
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          repeats=3
+          if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi
+          python3 scripts/report.py --repeats "$repeats" --run-url "$RUN_URL" --commit "$COMMIT"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: report-preview
+          path: .tmp/pages
+      - uses: actions/upload-pages-artifact@v4
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          path: .tmp/pages
+  deploy:
+    name: Deploy Pages
+    needs: report
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-26.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment
