@@ -129,7 +129,23 @@ def trial(editor, number, snapshot):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('LVCE workspace did not initialize Git')
                 time.sleep(.25)
-            page.key('g', 'KeyG', 10)
+            # Git initialization can precede keyboard routing/initial layout restore.
+            # Reissue this idempotent focus command only during setup, and stop as
+            # soon as the SCM view exists. Never send it during measurement.
+            for attempt in range(3):
+                page.key('g', 'KeyG', 10)
+                opened = False
+                for _ in range(20):
+                    opened = page.evaluate("!!document.querySelector('.SourceControl textarea')")
+                    if opened:
+                        break
+                    if process.poll() is not None:
+                        raise RuntimeError('LVCE exited while opening source control')
+                    time.sleep(.25)
+                if opened:
+                    break
+            if not opened:
+                raise TimeoutError('LVCE source-control view did not open')
         else:
             selector = ('[role="tab"][aria-label^="Source Control"]' if editor['id'] == 'vscode'
                         else '.ActivityBarItem[title="Source Control"]')
