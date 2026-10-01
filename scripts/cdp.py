@@ -7,13 +7,14 @@ import websocket
 
 
 class Page:
-    def __init__(self, port, timeout=60):
+    def __init__(self, port, timeout=60, url_suffix=None):
         deadline = time.monotonic() + timeout
         while True:
             try:
                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list', timeout=2) as response:
                     targets = json.load(response)
-                target = next(t for t in targets if t['type'] == 'page' and not t['url'].startswith('devtools:'))
+                target = next(t for t in targets if t['type'] == 'page' and not t['url'].startswith('devtools:')
+                              and (url_suffix is None or t['url'].split('?')[0].endswith(url_suffix)))
                 self.socket = websocket.create_connection(target['webSocketDebuggerUrl'], timeout=5, suppress_origin=True)
                 self.counter = 0
                 return

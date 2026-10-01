@@ -79,7 +79,7 @@ def trial(editor, number, snapshot):
     if editor['id'] == 'vscode':
         command += ['--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust', '--new-window']
     if editor['id'] == 'atom':
-        command += ['--new-window', '--foreground', '--in-process-gpu']
+        command += ['--new-window', '--foreground', '--in-process-gpu', '--']
     command.append(str(FIXTURE))
     modules = FIXTURE / 'node_modules'
     if modules.exists():
@@ -98,7 +98,7 @@ def trial(editor, number, snapshot):
     try:
         with (output / 'editor.log').open('w') as log:
             process = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
-        page = Page(port)
+        page = Page(port, url_suffix='/static/index.html' if editor['id'] == 'atom' else None)
         deadline = time.monotonic() + 60
         # document.readyState precedes workbench initialization in these editors.
         # Wait for actual controls and use native pointer/key events.
@@ -110,6 +110,14 @@ def trial(editor, number, snapshot):
                     raise TimeoutError('Atom did not open the fixture project')
                 time.sleep(.25)
             page.key('9', 'Digit9', 2)
+        elif editor['id'] == 'lvce':
+            while trace_state(trace)[1] < 1:
+                if process.poll() is not None:
+                    raise RuntimeError('LVCE exited during workspace startup')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('LVCE workspace did not initialize Git')
+                time.sleep(.25)
+            page.key('g', 'KeyG', 10)
         else:
             selector = ('[role="tab"][aria-label^="Source Control"]' if editor['id'] == 'vscode'
                         else '.ActivityBarItem[title="Source Control"]')
