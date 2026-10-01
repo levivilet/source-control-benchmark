@@ -29,6 +29,9 @@ def main():
     clean()
     # Lifecycle scripts are deliberately enabled: native builds and nested installs matter.
     subprocess.run(['nice', 'npm', 'ci'], cwd=FIXTURE, check=True)
+    # Atom requires identity to display its Git tab; fixture-local only, no commits.
+    run('git', 'config', '--local', 'user.name', 'Benchmark Fixture')
+    run('git', 'config', '--local', 'user.email', 'benchmark@example.invalid')
     clean()
     modules = FIXTURE / 'node_modules'
     files = [p for p in modules.rglob('*') if p.is_file() and not p.is_symlink()]

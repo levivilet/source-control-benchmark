@@ -42,7 +42,13 @@ jobs:
         run: .venv/bin/python scripts/install.py --editors '${{ matrix.editor }}'
       - name: Clone pinned VS Code and install all dependencies
         run: .venv/bin/python scripts/prepare.py
+      - name: Create isolated editor CPU accounting group
+        run: |
+          sudo mkdir /sys/fs/cgroup/source-control-benchmark
+          sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/source-control-benchmark/cgroup.procs /sys/fs/cgroup/source-control-benchmark/cgroup.kill
       - name: Measure real editor
+        env:
+          BENCHMARK_CGROUP: /sys/fs/cgroup/source-control-benchmark
         run: |
           repeats=3
           if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi

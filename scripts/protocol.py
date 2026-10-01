@@ -4,6 +4,7 @@ from datetime import datetime
 
 QUIET_SECONDS = 3.0
 TIMEOUT_SECONDS = 120.0
+CPU_PERCENT_LIMIT = 5.0
 
 
 def trace_state(path, since=None):
@@ -37,20 +38,22 @@ def trace_state(path, since=None):
 
 
 class Completion:
-    def __init__(self, baseline, started):
+    def __init__(self, baseline, started, require_status=True):
+        self.require_status = require_status
         self.baseline = baseline
         self.started = started
         self.quiet_since = None
         self.last_count = None
 
-    def observe(self, now, *, alive, ready, active, statuses, errors, count):
+    def observe(self, now, *, alive, ready, active, statuses, errors, count, cpu_percent=None):
         if not alive:
             raise RuntimeError('Editor exited during measurement')
         if errors:
             raise RuntimeError('Git status failed')
         if now - self.started >= TIMEOUT_SECONDS:
             raise TimeoutError('No proven source-control completion within 120 seconds')
-        if not ready or active or statuses <= self.baseline:
+        cpu_idle = cpu_percent is not None and 0 <= cpu_percent <= CPU_PERCENT_LIMIT
+        if not ready or active or not cpu_idle or (self.require_status and statuses <= self.baseline):
             self.quiet_since = None
         elif count != self.last_count or self.quiet_since is None:
             self.quiet_since = now

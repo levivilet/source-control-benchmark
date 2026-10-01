@@ -8,11 +8,13 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 
 from cdp import Page
+from cpu import Cpu
 from prepare import FIXTURE, ROOT, clean
-from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS
+from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS, CPU_PERCENT_LIMIT
 
 
 STATE = {
@@ -93,11 +95,21 @@ def trial(editor, number, snapshot):
     }, 'fixture': json.loads((ROOT / '.tmp/fixture.json').read_text()),
         'protocol': {'quietSeconds': QUIET_SECONDS, 'timeoutSeconds': TIMEOUT_SECONDS,
                      'pollSeconds': .25, 'completion': 'successful post-deletion Git status + clean SCM UI + no Git trace activity for quiet window'}}
+    group = Path(os.environ['BENCHMARK_CGROUP'])
+    if (group / 'cgroup.procs').read_text().strip():
+        raise RuntimeError('Editor cgroup is not empty')
+    cpu = Cpu(group)
+    result['protocol'].update(cpuPercentLimit=CPU_PERCENT_LIMIT, cpuSource='cgroup-v2 cpu.stat',
+                              completion='clean SCM + idle Git trace + editor cgroup CPU below threshold for quiet window')
     process = page = None
     observations = []
     try:
         with (output / 'editor.log').open('w') as log:
-            process = subprocess.Popen(command, env=env, stdout=log, stderr=log, start_new_session=True)
+            launch = ['sudo', '-n', sys.executable, str(ROOT / 'scripts/launch.py'),
+                      str(group), str(os.getuid()), str(os.getgid()), *command]
+            process = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=log, stderr=log, start_new_session=True)
+            process.stdin.write(json.dumps(env).encode())
+            process.stdin.close()
         page = Page(port, url_suffix='/static/index.html' if editor['id'] == 'atom' else None)
         deadline = time.monotonic() + 60
         # document.readyState precedes workbench initialization in these editors.
@@ -131,11 +143,12 @@ def trial(editor, number, snapshot):
         while True:
             active, statuses, errors, count = trace_state(trace)
             ready = page.evaluate(STATE[editor['id']])
-            observations.append({'phase': 'baseline', 'ready': ready, 'activeGit': len(active),
+            cpu_percent = cpu.sample()
+            observations.append({'phase': 'baseline', 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
                                  'statuses': statuses, 'traceLines': count})
             if initial.observe(time.monotonic(), alive=process.poll() is None,
                                ready=ready, active=active,
-                               statuses=statuses, errors=errors, count=count):
+                               statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
                 break
             time.sleep(.25)
         page.screenshot(output / 'before.png')
@@ -144,27 +157,31 @@ def trial(editor, number, snapshot):
         clean()
         started = time.monotonic()
         wall_started = time.time()
-        completion = Completion(0, started)
+        completion = Completion(0, started, require_status=False)
         shutil.rmtree(modules)
         deleted = time.monotonic()
         result['deletionSeconds'] = deleted - started
         if modules.exists():
             raise RuntimeError('node_modules deletion did not finish')
         result['deleted'] = True
+        cpu = Cpu(group)
+        time.sleep(.25)
         while True:
             now = time.monotonic()
             active, statuses, errors, count = trace_state(trace, since=wall_started)
             ready = page.evaluate(STATE[editor['id']])
-            observations.append({'seconds': now - started, 'ready': ready, 'activeGit': len(active),
+            cpu_percent = cpu.sample()
+            observations.append({'seconds': now - started, 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
                                  'statuses': statuses, 'traceLines': count})
             if completion.observe(now, alive=process.poll() is None, ready=ready, active=active,
-                                  statuses=statuses, errors=errors, count=count):
+                                  statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
                 break
             time.sleep(.25)
         clean()
         page.screenshot(output / 'after.png')
         result.update(status='ok', totalSeconds=now - started, afterDeletionSeconds=now - deleted,
-                      finalStatuses=result['baselineStatuses'] + statuses)
+                      finalStatuses=result['baselineStatuses'] + statuses,
+                      refreshObserved=statuses > 0, cpuEvidence=[o for o in observations if 'seconds' in o and o['seconds'] >= completion.quiet_since - started])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
         if page:
@@ -177,6 +194,7 @@ def trial(editor, number, snapshot):
         if page:
             page.close()
         stop(process)
+        (group / 'cgroup.kill').write_text('1')
         (output / 'observations.json').write_text(json.dumps(observations, indent=2))
         (output / 'result.json').write_text(json.dumps(result, indent=2))
         shutil.rmtree(profile)
