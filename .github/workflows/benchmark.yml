@@ -41,6 +41,8 @@ jobs:
       - name: Install checksum-pinned editor
         run: .venv/bin/python scripts/install.py --editors '${{ matrix.editor }}'
       - name: Clone pinned VS Code and install all dependencies
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/prepare.py
       - name: Create isolated editor CPU accounting group
         run: |

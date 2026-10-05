@@ -27,10 +27,10 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -r requirements.txt
       - name: Install checksum-pinned editor
-        run: |
-          .venv/bin/python scripts/install.py --editors 'lvce'
-          .venv/bin/python scripts/capture_navigation.py
+        run: .venv/bin/python scripts/install.py --editors 'lvce'
       - name: Clone pinned VS Code and install all dependencies
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/prepare.py
       - name: Create isolated editor CPU accounting group
         run: |
@@ -39,8 +39,6 @@ jobs:
       - name: Measure real editor
         env:
           BENCHMARK_CGROUP: /sys/fs/cgroup/source-control-benchmark
-          BENCHMARK_CAPTURE: '1'
-          BENCHMARK_ATTEMPT: ${{ matrix.attempt }}
         run: |
           repeats=3
           if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi

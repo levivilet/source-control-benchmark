@@ -13,6 +13,7 @@ import time
 
 from cdp import Page
 from cpu import Cpu
+from navigation import focus_lvce_source_control
 from prepare import FIXTURE, ROOT, clean
 from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS, CPU_PERCENT_LIMIT
 
@@ -111,30 +112,6 @@ def trial(editor, number, snapshot):
             process.stdin.write(json.dumps(env).encode())
             process.stdin.close()
         page = Page(port, url_suffix='/static/index.html' if editor['id'] == 'atom' else None)
-        if os.environ.get('BENCHMARK_CAPTURE') == '1':
-            capture_script = """(() => {
-              window.benchmarkTimeline = [];
-              const record = (kind, details) => window.benchmarkTimeline.push({
-                sequence: window.benchmarkTimeline.length, monotonicTime: performance.now(),
-                wallTime: Date.now(), kind, details});
-              const state = () => ({
-                sourceControl: !!document.querySelector('.SourceControl'),
-                explorer: !!document.querySelector('.Explorer'),
-                sidebarTitle: document.querySelector('.SideBarTitleAreaTitle')?.textContent,
-                focused: document.hasFocus(), activeElement: document.activeElement?.tagName});
-              record('attached', state());
-              let previous = JSON.stringify(state());
-              new MutationObserver(() => {
-                const current = JSON.stringify(state());
-                if (current !== previous) { previous = current; record('dom', JSON.parse(current)); }
-              }).observe(document, {childList: true, subtree: true, attributes: true});
-              window.addEventListener('keydown', event => record('keydown', {
-                key: event.key, ctrl: event.ctrlKey, shift: event.shiftKey}), true);
-              window.addEventListener('error', event => record('error', {message: event.message}));
-              window.addEventListener('unhandledrejection', event => record('rejection', {message: String(event.reason)}));
-            })()"""
-            page.call('Page.addScriptToEvaluateOnNewDocument', source=capture_script)
-            page.evaluate(capture_script)
         deadline = time.monotonic() + 60
         # document.readyState precedes workbench initialization in these editors.
         # Wait for actual controls and use native pointer/key events.
@@ -165,8 +142,7 @@ def trial(editor, number, snapshot):
             # soon as the SCM view exists. Never send it during measurement.
             for attempt in range(3):
                 navigation.append({'attempt': attempt, 'beforeFocus': page.evaluate('document.hasFocus()')})
-                page.call('Page.bringToFront')
-                page.key('g', 'KeyG', 10)
+                focus_lvce_source_control(page, process, deadline)
                 opened = False
                 for _ in range(20):
                     opened = page.evaluate("!!document.querySelector('.SourceControl textarea')")
@@ -249,14 +225,6 @@ def trial(editor, number, snapshot):
                 pass
     finally:
         if page:
-            if os.environ.get('BENCHMARK_CAPTURE') == '1':
-                try:
-                    capture = page.evaluate("""({messages: globalThis.___receivedMessages || [],
-                        timeline: window.benchmarkTimeline || []})""")
-                except Exception as error:
-                    capture = {'captureError': str(error)}
-                attempt = os.environ.get('BENCHMARK_ATTEMPT', 'local')
-                (output / f'allmessages-source-control-{attempt}.json').write_text(json.dumps(capture, indent=2))
             page.close()
         stop(process)
         (group / 'cgroup.kill').write_text('1')
