@@ -111,6 +111,28 @@ def trial(editor, number, snapshot):
             process.stdin.write(json.dumps(env).encode())
             process.stdin.close()
         page = Page(port, url_suffix='/static/index.html' if editor['id'] == 'atom' else None)
+        if os.environ.get('BENCHMARK_CAPTURE') == '1':
+            page.evaluate("""(() => {
+              window.benchmarkTimeline = [];
+              const record = (kind, details) => window.benchmarkTimeline.push({
+                sequence: window.benchmarkTimeline.length, monotonicTime: performance.now(),
+                wallTime: Date.now(), kind, details});
+              const state = () => ({
+                sourceControl: !!document.querySelector('.SourceControl'),
+                explorer: !!document.querySelector('.Explorer'),
+                sidebarTitle: document.querySelector('.SideBarTitleAreaTitle')?.textContent,
+                focused: document.hasFocus(), activeElement: document.activeElement?.tagName});
+              record('attached', state());
+              let previous = JSON.stringify(state());
+              new MutationObserver(() => {
+                const current = JSON.stringify(state());
+                if (current !== previous) { previous = current; record('dom', JSON.parse(current)); }
+              }).observe(document.documentElement, {childList: true, subtree: true, attributes: true});
+              window.addEventListener('keydown', event => record('keydown', {
+                key: event.key, ctrl: event.ctrlKey, shift: event.shiftKey}), true);
+              window.addEventListener('error', event => record('error', {message: event.message}));
+              window.addEventListener('unhandledrejection', event => record('rejection', {message: String(event.reason)}));
+            })()""")
         deadline = time.monotonic() + 60
         # document.readyState precedes workbench initialization in these editors.
         # Wait for actual controls and use native pointer/key events.
@@ -225,6 +247,14 @@ def trial(editor, number, snapshot):
                 pass
     finally:
         if page:
+            if os.environ.get('BENCHMARK_CAPTURE') == '1':
+                try:
+                    capture = page.evaluate("""({messages: globalThis.___receivedMessages || [],
+                        timeline: window.benchmarkTimeline || []})""")
+                except Exception as error:
+                    capture = {'captureError': str(error)}
+                attempt = os.environ.get('BENCHMARK_ATTEMPT', 'local')
+                (output / f'allmessages-source-control-{attempt}.json').write_text(json.dumps(capture, indent=2))
             page.close()
         stop(process)
         (group / 'cgroup.kill').write_text('1')
