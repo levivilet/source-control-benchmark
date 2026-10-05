@@ -1,0 +1,50 @@
+name: LVCE source-control reproduction
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    name: LVCE attempt ${{ matrix.attempt }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.18.0'
+      - name: Install build and desktop prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv make g++ pkg-config git curl xz-utils \
+            libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev \
+            xvfb xauth openbox libgtk-3-0 libnss3 libgbm1 libxss1 libxtst6 \
+            libxkbcommon-x11-0 libasound2t64
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+      - name: Install checksum-pinned editor
+        run: .venv/bin/python scripts/install.py --editors 'lvce'
+      - name: Clone pinned VS Code and install all dependencies
+        run: .venv/bin/python scripts/prepare.py
+      - name: Create isolated editor CPU accounting group
+        run: |
+          sudo mkdir /sys/fs/cgroup/source-control-benchmark
+          sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/source-control-benchmark/cgroup.procs /sys/fs/cgroup/source-control-benchmark/cgroup.kill
+      - name: Measure real editor
+        env:
+          BENCHMARK_CGROUP: /sys/fs/cgroup/source-control-benchmark
+        run: |
+          repeats=3
+          if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi
+          xvfb-run -a bash -c 'openbox >/dev/null 2>&1 & exec .venv/bin/python scripts/benchmark.py --editor "$1" --repeats "$2"' _ 'lvce' "$repeats"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: flaky-lvce-attempt-${{ matrix.attempt }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
