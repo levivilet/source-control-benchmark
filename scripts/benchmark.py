@@ -13,6 +13,7 @@ import time
 
 from cdp import Page
 from cpu import Cpu
+from navigation import focus_lvce_source_control
 from prepare import FIXTURE, ROOT, clean
 from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS, CPU_PERCENT_LIMIT
 
@@ -141,8 +142,7 @@ def trial(editor, number, snapshot):
             # soon as the SCM view exists. Never send it during measurement.
             for attempt in range(3):
                 navigation.append({'attempt': attempt, 'beforeFocus': page.evaluate('document.hasFocus()')})
-                page.call('Page.bringToFront')
-                page.key('g', 'KeyG', 10)
+                focus_lvce_source_control(page, process, deadline)
                 opened = False
                 for _ in range(20):
                     opened = page.evaluate("!!document.querySelector('.SourceControl textarea')")
