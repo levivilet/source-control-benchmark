@@ -112,7 +112,7 @@ def trial(editor, number, snapshot):
             process.stdin.close()
         page = Page(port, url_suffix='/static/index.html' if editor['id'] == 'atom' else None)
         if os.environ.get('BENCHMARK_CAPTURE') == '1':
-            page.evaluate("""(() => {
+            capture_script = """(() => {
               window.benchmarkTimeline = [];
               const record = (kind, details) => window.benchmarkTimeline.push({
                 sequence: window.benchmarkTimeline.length, monotonicTime: performance.now(),
@@ -127,12 +127,14 @@ def trial(editor, number, snapshot):
               new MutationObserver(() => {
                 const current = JSON.stringify(state());
                 if (current !== previous) { previous = current; record('dom', JSON.parse(current)); }
-              }).observe(document.documentElement, {childList: true, subtree: true, attributes: true});
+              }).observe(document, {childList: true, subtree: true, attributes: true});
               window.addEventListener('keydown', event => record('keydown', {
                 key: event.key, ctrl: event.ctrlKey, shift: event.shiftKey}), true);
               window.addEventListener('error', event => record('error', {message: event.message}));
               window.addEventListener('unhandledrejection', event => record('rejection', {message: String(event.reason)}));
-            })()""")
+            })()"""
+            page.call('Page.addScriptToEvaluateOnNewDocument', source=capture_script)
+            page.evaluate(capture_script)
         deadline = time.monotonic() + 60
         # document.readyState precedes workbench initialization in these editors.
         # Wait for actual controls and use native pointer/key events.
