@@ -120,6 +120,8 @@ jobs:
           fi
           test -n "$PERF"
           echo "PERF=$PERF" >> "$GITHUB_ENV"
+          # Keep the shared parent writable for subsequent unprivileged downloads.
+          mkdir -p .tmp
           python3 -m venv .venv
           .venv/bin/pip install -r requirements.txt
       - name: Validate native instruction accounting
