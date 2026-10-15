@@ -58,7 +58,7 @@ jobs:
       - name: Install build, desktop and perf prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-venv linux-perf linux-tools-generic make g++ pkg-config git curl xz-utils \
+          sudo apt-get install -y python3 python3-venv linux-tools-generic make g++ pkg-config git curl xz-utils \
             libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev \
             xvfb xauth openbox libgtk-3-0 libnss3 libgbm1 libxss1 libxtst6 \
             libxkbcommon-x11-0 libasound2t64
