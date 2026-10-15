@@ -10,6 +10,29 @@ concurrency:
   group: source-control-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  accounting:
+    name: Hardware accounting
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install perf and compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-generic build-essential
+          sudo sysctl kernel.perf_event_paranoid=-1
+          mkdir -p .tmp
+      - name: Validate instruction counter boundaries
+        run: |
+          PERF=$(find -L /usr/lib/linux-tools -name perf -type f | sort | tail -n 1)
+          test -n "$PERF"
+          sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: instruction-accounting
+          path: results/
+          if-no-files-found: error
   test:
     name: Protocol tests
     runs-on: ubuntu-26.04
@@ -29,13 +52,17 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24.18.0'
-      - name: Install build and desktop prerequisites
+      - name: Install build, desktop and perf prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-venv make g++ pkg-config git curl xz-utils \
+          sudo apt-get install -y python3 python3-venv linux-tools-generic make g++ pkg-config git curl xz-utils \
             libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev \
             xvfb xauth openbox libgtk-3-0 libnss3 libgbm1 libxss1 libxtst6 \
             libxkbcommon-x11-0 libasound2t64
+          sudo sysctl kernel.perf_event_paranoid=-1
+          PERF=$(find -L /usr/lib/linux-tools -name perf -type f | sort | tail -n 1)
+          test -n "$PERF"
+          echo "PERF=$PERF" >> "$GITHUB_ENV"
           python3 -m venv .venv
           .venv/bin/pip install -r requirements.txt
       - name: Install checksum-pinned editor
@@ -62,16 +89,17 @@ jobs:
           retention-days: 30
   report:
     name: Validate report
-    needs: [test, benchmark]
+    needs: [accounting, test, benchmark]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
-      - name: Require all editors and protocol tests
+      - name: Require hardware accounting, all editors and protocol tests
         env:
+          ACCOUNTING_RESULT: ${{ needs.accounting.result }}
           TEST_RESULT: ${{ needs.test.result }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
-        run: test "$TEST_RESULT" = success && test "$BENCHMARK_RESULT" = success
+        run: test "$ACCOUNTING_RESULT" = success && test "$TEST_RESULT" = success && test "$BENCHMARK_RESULT" = success
       - uses: actions/download-artifact@v5
         with:
           pattern: source-control-*

@@ -12,6 +12,7 @@ import sys
 import time
 
 from cdp import Page
+from counters import Capture
 from cpu import Cpu
 from prepare import FIXTURE, ROOT, clean
 from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS, CPU_PERCENT_LIMIT
@@ -89,7 +90,7 @@ def trial(editor, number, snapshot):
     shutil.copytree(snapshot, modules, symlinks=True)
     clean()
     result = {'editor': editor, 'trial': number, 'status': 'failed', 'host': {
-        'platform': platform.platform(), 'cpuCount': os.cpu_count(),
+        'platform': platform.platform(), 'architecture': platform.machine(), 'cpuCount': os.cpu_count(),
         'cpu': next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
                      if line.startswith('model name')), 'unknown'),
     }, 'fixture': json.loads((ROOT / '.tmp/fixture.json').read_text()),
@@ -188,28 +189,37 @@ def trial(editor, number, snapshot):
         result['baselineStatuses'] = statuses
         # The harness's own git validation never receives GIT_TRACE2_EVENT.
         clean()
-        started = time.monotonic()
+        perf = os.environ['PERF']
+        counter_dir = output / 'counters'
+        counter_dir.mkdir()
         wall_started = time.time()
-        completion = Completion(0, started, require_status=False)
-        shutil.rmtree(modules)
-        deleted = time.monotonic()
-        result['deletionSeconds'] = deleted - started
-        if modules.exists():
-            raise RuntimeError('node_modules deletion did not finish')
-        result['deleted'] = True
-        cpu = Cpu(group)
-        time.sleep(.25)
-        while True:
-            now = time.monotonic()
-            active, statuses, errors, count = trace_state(trace, since=wall_started)
-            ready = page.evaluate(STATE[editor['id']])
-            cpu_percent = cpu.sample()
-            observations.append({'seconds': now - started, 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
-                                 'statuses': statuses, 'traceLines': count})
-            if completion.observe(now, alive=process.poll() is None, ready=ready, active=active,
-                                  statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
-                break
+        completion = Completion(0, 0, require_status=False)
+        with Capture(perf, counter_dir, group=group) as counters:
+            counters.start()
+            started = counters.started['acknowledgedAt']
+            completion.started = started
+            wall_started = time.time()
+            shutil.rmtree(modules)
+            deleted = time.monotonic()
+            result['deletionSeconds'] = deleted - started
+            if modules.exists():
+                raise RuntimeError('node_modules deletion did not finish')
+            result['deleted'] = True
+            cpu = Cpu(group)
             time.sleep(.25)
+            while True:
+                now = time.monotonic()
+                active, statuses, errors, count = trace_state(trace, since=wall_started)
+                ready = page.evaluate(STATE[editor['id']])
+                cpu_percent = cpu.sample()
+                observations.append({'seconds': now - started, 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
+                                     'statuses': statuses, 'traceLines': count})
+                if completion.observe(now, alive=process.poll() is None, ready=ready, active=active,
+                                      statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
+                    break
+                time.sleep(.25)
+            counters.cutoff()
+            result['instructionEvidence'] = counters.finish()
         clean()
         page.screenshot(output / 'after.png')
         result.update(status='ok', totalSeconds=now - started, afterDeletionSeconds=now - deleted,
