@@ -44,7 +44,7 @@ jobs:
       - run: python3 -m unittest discover -s tests
   benchmark:
     name: Benchmark (${{ matrix.editor }})
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -71,6 +71,8 @@ jobs:
           echo "PERF=$PERF" >> "$GITHUB_ENV"
           python3 -m venv .venv
           .venv/bin/pip install -r requirements.txt
+      - name: Validate native instruction counter availability
+        run: sudo env LC_ALL=C "$PERF" stat -e instructions -- true
       - name: Install checksum-pinned editor
         run: .venv/bin/python scripts/install.py --editors '${{ matrix.editor }}'
       - name: Clone pinned VS Code and install all dependencies
