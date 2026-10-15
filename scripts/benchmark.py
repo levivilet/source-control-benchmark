@@ -1,9 +1,11 @@
 """Measure natural source-control refresh after deleting ignored dependencies."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import shutil
 import signal
 import socket
@@ -12,6 +14,7 @@ import sys
 import time
 
 from cdp import Page
+from counters import Capture
 from cpu import Cpu
 from prepare import FIXTURE, ROOT, clean
 from protocol import Completion, trace_state, QUIET_SECONDS, TIMEOUT_SECONDS, CPU_PERCENT_LIMIT
@@ -54,8 +57,8 @@ def stop(process):
         process.wait(timeout=5)
 
 
-def trial(editor, number, snapshot):
-    output = ROOT / 'results' / editor['id'] / str(number)
+def trial(editor, number, snapshot, instructions=False):
+    output = ROOT / 'results' / ('instructions' if instructions else 'timing') / editor['id'] / str(number)
     output.mkdir(parents=True)
     profile = ROOT / '.tmp' / f"profile-{editor['id']}-{number}"
     profile.mkdir()
@@ -72,6 +75,15 @@ def trial(editor, number, snapshot):
         'workbench.startupEditor': 'none', 'security.workspace.trust.enabled': False,
         'git.autofetch': False, 'extensions.autoUpdate': False, 'update.mode': 'none',
     }))
+    editor_uid = int(os.environ.get('SUDO_UID', os.getuid()))
+    editor_gid = int(os.environ.get('SUDO_GID', os.getgid()))
+    if os.geteuid() == 0 and editor_uid != 0:
+        for path in [profile, *profile.rglob('*')]:
+            os.chown(path, editor_uid, editor_gid)
+        editor_user = pwd.getpwuid(editor_uid)
+        env.update(HOME=editor_user.pw_dir, USER=editor_user.pw_name, LOGNAME=editor_user.pw_name)
+        trace.touch()
+        os.chown(trace, editor_uid, editor_gid)
     with socket.socket() as port_socket:
         port_socket.bind(('127.0.0.1', 0))
         port = port_socket.getsockname()[1]
@@ -89,7 +101,7 @@ def trial(editor, number, snapshot):
     shutil.copytree(snapshot, modules, symlinks=True)
     clean()
     result = {'editor': editor, 'trial': number, 'status': 'failed', 'host': {
-        'platform': platform.platform(), 'cpuCount': os.cpu_count(),
+        'platform': platform.platform(), 'architecture': platform.machine(), 'cpuCount': os.cpu_count(),
         'cpu': next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
                      if line.startswith('model name')), 'unknown'),
     }, 'fixture': json.loads((ROOT / '.tmp/fixture.json').read_text()),
@@ -103,10 +115,11 @@ def trial(editor, number, snapshot):
                               completion='clean SCM + idle Git trace + editor cgroup CPU below threshold for quiet window')
     process = page = None
     observations = []
+    counter_dir = output / 'counters'
     try:
         with (output / 'editor.log').open('w') as log:
             launch = ['sudo', '-n', sys.executable, str(ROOT / 'scripts/launch.py'),
-                      str(group), str(os.getuid()), str(os.getgid()), *command]
+                      str(group), str(editor_uid), str(editor_gid), *command]
             process = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=log, stderr=log, start_new_session=True)
             process.stdin.write(json.dumps(env).encode())
             process.stdin.close()
@@ -129,40 +142,26 @@ def trial(editor, number, snapshot):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('LVCE workspace did not initialize Git')
                 time.sleep(.25)
-            # Record setup-only input delivery for CI navigation diagnostics.
-            page.evaluate("""window.benchmarkKeys = [];
-                window.benchmarkKeyListener = event => window.benchmarkKeys.push({
-                    key: event.key, code: event.code, ctrl: event.ctrlKey,
-                    shift: event.shiftKey, target: event.target.tagName});
-                window.addEventListener('keydown', window.benchmarkKeyListener, true);""")
-            navigation = []
-            # Git initialization can precede keyboard routing/initial layout restore.
-            # Reissue this idempotent focus command only during setup, and stop as
-            # soon as the SCM view exists. Never send it during measurement.
-            for attempt in range(3):
-                navigation.append({'attempt': attempt, 'beforeFocus': page.evaluate('document.hasFocus()')})
-                page.call('Page.bringToFront')
-                page.key('g', 'KeyG', 10)
-                opened = False
-                for _ in range(20):
-                    opened = page.evaluate("!!document.querySelector('.SourceControl textarea')")
-                    if opened:
-                        break
-                    if process.poll() is not None:
-                        raise RuntimeError('LVCE exited while opening source control')
-                    time.sleep(.25)
-                if opened:
-                    break
-            navigation.append(page.evaluate("""({
-                focused: document.hasFocus(), events: window.benchmarkKeys,
-                activeElement: document.activeElement.tagName,
-                opened: !!document.querySelector('.SourceControl textarea')
-            })"""))
+            # Git startup can finish before the initial Explorer restore has rendered.
+            # Complete that visible setup state before requesting a different sidebar.
+            while not page.evaluate("!!document.querySelector('.Explorer .TreeItem')"):
+                if process.poll() is not None:
+                    raise RuntimeError('LVCE exited during initial Explorer restore')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('LVCE initial Explorer did not render')
+                time.sleep(.25)
+            navigation = {'explorerReady': True, 'method': 'native Source Control click'}
+            page.call('Page.bringToFront')
+            navigation['clicked'] = page.click('.ActivityBarItem[title="Source Control"]')
             (output / 'navigation.json').write_text(json.dumps(navigation, indent=2))
-            page.evaluate("""window.removeEventListener('keydown', window.benchmarkKeyListener, true);
-                delete window.benchmarkKeyListener; delete window.benchmarkKeys;""")
-            if not opened:
-                raise TimeoutError('LVCE source-control view did not open')
+            if not navigation['clicked']:
+                raise RuntimeError('LVCE source-control activity item was not visible')
+            while not page.evaluate("!!document.querySelector('.SourceControl textarea')"):
+                if process.poll() is not None:
+                    raise RuntimeError('LVCE exited while opening source control')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('LVCE source-control view did not open')
+                time.sleep(.25)
         else:
             selector = ('[role="tab"][aria-label^="Source Control"]' if editor['id'] == 'vscode'
                         else '.ActivityBarItem[title="Source Control"]')
@@ -188,28 +187,38 @@ def trial(editor, number, snapshot):
         result['baselineStatuses'] = statuses
         # The harness's own git validation never receives GIT_TRACE2_EVENT.
         clean()
-        started = time.monotonic()
+        if instructions:
+            counter_dir.mkdir()
         wall_started = time.time()
-        completion = Completion(0, started, require_status=False)
-        shutil.rmtree(modules)
-        deleted = time.monotonic()
-        result['deletionSeconds'] = deleted - started
-        if modules.exists():
-            raise RuntimeError('node_modules deletion did not finish')
-        result['deleted'] = True
-        cpu = Cpu(group)
-        time.sleep(.25)
-        while True:
-            now = time.monotonic()
-            active, statuses, errors, count = trace_state(trace, since=wall_started)
-            ready = page.evaluate(STATE[editor['id']])
-            cpu_percent = cpu.sample()
-            observations.append({'seconds': now - started, 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
-                                 'statuses': statuses, 'traceLines': count})
-            if completion.observe(now, alive=process.poll() is None, ready=ready, active=active,
-                                  statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
-                break
+        completion = Completion(0, 0, require_status=False)
+        with (Capture(os.environ['PERF'], counter_dir, group=group) if instructions else nullcontext()) as counters:
+            if counters:
+                counters.start()
+            started = counters.started['acknowledgedAt'] if counters else time.monotonic()
+            completion.started = started
+            wall_started = time.time()
+            shutil.rmtree(modules)
+            deleted = time.monotonic()
+            result['deletionSeconds'] = deleted - started
+            if modules.exists():
+                raise RuntimeError('node_modules deletion did not finish')
+            result['deleted'] = True
+            cpu = Cpu(group)
             time.sleep(.25)
+            while True:
+                now = time.monotonic()
+                active, statuses, errors, count = trace_state(trace, since=wall_started)
+                ready = page.evaluate(STATE[editor['id']])
+                cpu_percent = cpu.sample()
+                observations.append({'seconds': now - started, 'cpuPercent': cpu_percent, 'ready': ready, 'activeGit': len(active),
+                                     'statuses': statuses, 'traceLines': count})
+                if completion.observe(now, alive=process.poll() is None, ready=ready, active=active,
+                                      statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
+                    break
+                time.sleep(.25)
+            if counters:
+                counters.cutoff()
+                result['instructionEvidence'] = counters.finish()
         clean()
         page.screenshot(output / 'after.png')
         result.update(status='ok', totalSeconds=now - started, afterDeletionSeconds=now - deleted,
@@ -217,6 +226,9 @@ def trial(editor, number, snapshot):
                       refreshObserved=statuses > 0, cpuEvidence=[o for o in observations if 'seconds' in o and o['seconds'] >= completion.quiet_since - started])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
+        perf_log = counter_dir / 'perf.log'
+        if perf_log.exists():
+            result['instructionFailureLog'] = perf_log.read_text()
         if page:
             try:
                 page.screenshot(output / 'failure.png')
@@ -225,6 +237,7 @@ def trial(editor, number, snapshot):
                 pass
     finally:
         if page:
+            page.save_diagnostics(output / 'browser.json')
             page.close()
         stop(process)
         (group / 'cgroup.kill').write_text('1')
@@ -238,15 +251,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--editor', choices=list(STATE), required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--instructions', action='store_true', help='measure hardware instructions on ARM64')
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error('repeats must be positive')
-    editor = next(e for e in json.loads((ROOT / 'config/editors.lock.json').read_text()) if e['id'] == args.editor)
+    expected_arch = 'aarch64' if args.instructions else 'x86_64'
+    if platform.machine() != expected_arch:
+        parser.error(f'expected native {expected_arch} runner')
+    lock = 'instruction-editors.lock.json' if args.instructions else 'editors.lock.json'
+    entries = json.loads((ROOT / 'config' / lock).read_text())
+    if args.editor not in {e['id'] for e in entries}:
+        parser.error('editor is unavailable in the selected native inventory')
+    editor = next(e for e in entries if e['id'] == args.editor)
     snapshot = ROOT / '.tmp/dependencies'
     if snapshot.exists():
         raise RuntimeError('Use a fresh run directory; dependency snapshot already exists')
     shutil.copytree(FIXTURE / 'node_modules', snapshot, symlinks=True)
-    results = [trial(editor, number, snapshot) for number in range(1, args.repeats + 1)]
+    results = [trial(editor, number, snapshot, args.instructions) for number in range(1, args.repeats + 1)]
     for result in results:
         print(result['editor']['name'], result['trial'], result['status'], result.get('error', result.get('totalSeconds')))
     if any(r['status'] != 'ok' for r in results):

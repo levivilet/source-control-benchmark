@@ -7,7 +7,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from protocol import Completion, trace_state
-from report import validate
+from report import validate, validate_inventories
+from counters import parse_counter
 
 
 class ProtocolTest(unittest.TestCase):
@@ -78,15 +79,50 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(len(errors), 1)
 
 
+class CounterTest(unittest.TestCase):
+    def test_parses_single_fully_scheduled_instruction_count(self):
+        self.assertEqual(parse_counter('12345;;instructions;;1000000;100.00\n'), 12345)
+
+    def test_rejects_missing_unsupported_multiplexed_or_invalid_counters(self):
+        for raw in ['', '<not supported>;;instructions;;0;0.00\n',
+                    '123;;instructions;;1000;50.00\n', '0;;instructions;;1000;100.00\n',
+                    '1;;instructions;;1000;100.00\n2;;instructions;;1000;100.00\n']:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse_counter(raw)
+
+
 class ReportTest(unittest.TestCase):
     def setUp(self):
         self.editors = [{'id': editor} for editor in ['vscode', 'lvce', 'atom']]
         self.fixture = {'commit': 'pinned'}
         self.results = [dict(editor=editor, trial=1, status='ok', deleted=True,
+                             host={'architecture': 'x86_64'},
+                             instructionEvidence={'instructions': 12345, 'rawCounter': '12345;;instructions', 'perfVersion': 'perf version 7',
+                                 'cutoffAcknowledged': True,
+                                 'start': {'acknowledgedAt': 1, 'latencySeconds': .01},
+                                 'cutoff': {'requestedAt': 2, 'acknowledgedAt': 2.01, 'latencySeconds': .01}},
                              fixture=self.fixture, baselineStatuses=1, finalStatuses=2,
                              totalSeconds=5, deletionSeconds=1, afterDeletionSeconds=4, refreshObserved=True,
                              cpuEvidence=[dict(seconds=i*.25, cpuPercent=.5, ready=True, activeGit=0, traceLines=20) for i in range(13)])
                         for editor in self.editors]
+
+    def test_both_native_inventories_are_required(self):
+        timing = copy.deepcopy(self.results)
+        for result in timing:
+            del result['instructionEvidence']
+        counts = copy.deepcopy(self.results[:2])
+        for result in counts:
+            result['host']['architecture'] = 'aarch64'
+        def check(timing, counts):
+            validate_inventories(timing, counts, 1, self.editors, self.editors[:2], self.fixture)
+        check(timing, counts)
+        for bad_timing, bad_counts in [(timing[:-1], counts), (timing, counts[:-1]),
+                                       (timing, timing[:2]), (timing, counts + [counts[0]])]:
+            with self.assertRaises(ValueError):
+                check(bad_timing, bad_counts)
+        del counts[0]['instructionEvidence']
+        with self.assertRaises(ValueError):
+            check(timing, counts)
 
     def test_complete_inventory(self):
         validate(self.results, 1, self.editors, self.fixture)
@@ -108,6 +144,11 @@ class ReportTest(unittest.TestCase):
             results = copy.deepcopy(self.results)
             results[0][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
+                validate(results, 1, self.editors, self.fixture)
+        for key, value in [('instructions', 0), ('rawCounter', ''), ('cutoffAcknowledged', False)]:
+            results = copy.deepcopy(self.results)
+            results[0]['instructionEvidence'][key] = value
+            with self.subTest(instruction_key=key), self.assertRaises(ValueError):
                 validate(results, 1, self.editors, self.fixture)
 
 

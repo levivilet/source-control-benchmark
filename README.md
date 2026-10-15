@@ -5,31 +5,41 @@ Compare VS Code, LVCE Editor and Atom after deleting the root `node_modules` dir
 ## Scenario and metric
 
 1. Clone the exact revision in `config/fixture.json`, use its Node version, and run `nice npm ci` with lifecycle scripts enabled. Python, compiler, native library and desktop prerequisites are installed by the workflow.
-2. Preserve the installed root dependency tree. Before every trial restore it, verify clean Git status and launch the editor with a fresh Chromium and application profile. Nested workspace dependencies remain installed. The fixture version and editor versions are independent; editor binaries and SHA-256 digests are pinned in `config/editors.lock.json`.
+2. Preserve the installed root dependency tree. Before every trial restore it, verify clean Git status and launch the editor with a fresh Chromium and application profile. Nested workspace dependencies remain installed. The fixture version and editor versions are independent; editor binaries and SHA-256 digests are pinned in `config/editors.lock.json` (x64 timing) and `config/instruction-editors.lock.json` (ARM64 instructions).
 3. Open source control. Require the visible changes view to be empty, at least one successful editor-origin Git status, no active Git command, and three seconds without Git trace activity while editor CPU stays at or below 5% of one logical CPU.
 4. Delete root `node_modules`, timing deletion separately. Wait for a clean visible changes view, no active Git commands and three seconds without Git trace activity while editor CPU stays at or below 5% of one logical CPU. Record whether an automatic Git refresh occurred; ignored-directory deletion need not trigger one. Do not manually refresh, create a marker file, modify ignore rules or inject a synthetic source-control change.
 5. Save total elapsed time (from deletion start), deletion duration, remaining settling time, UI observations, screenshots, Git Trace2 events, versions, fixture sizes and host information. Shut down the editor before deleting its profile.
 
+In the separate native ARM64 trials, `perf stat` counts retired hardware instructions for tasks in the editor cgroup. The acknowledged counter interval starts immediately before root `node_modules` deletion and ends when the existing completion gate succeeds. The editor and all descendants, including Git children, are counted; the harness, deletion process, X server, desktop, setup and cleanup are outside the cgroup. Raw perf output, perf version, host architecture, and the requested and acknowledged boundary times are retained. Missing, unsupported, invalid, or multiplexed counts fail the trial and prevent publication. Instruction totals depend on architecture and host and should not be compared across different architectures or runner classes.
+
 The total is an **observable settling bound**, including deletion and the quiet window, sampled every 250 ms. CPU is measured using a dedicated cgroup v2 containing only the editor and its descendants, including exited Git children. The benchmark and deletion process remain outside it. The 5% threshold defines operational idle; it does not prove all internal queues are empty. Ignored files leave the visible change count at zero, so that alone is insufficient. An unchanged UI without continuous CPU accounting is insufficient and fails. An editor that ignores node_modules can be idle without a fresh Git status: record “not observed” for automatic refresh and measure the same CPU/UI/Git quiet window, never substitute zero milliseconds. Timeouts (120 seconds), crashes and Git status errors also fail. Git traces are inherited only by the editor, so the harness's independent clean-status checks cannot satisfy the completion gate.
 
-GitHub Actions runs all three editors in separate Ubuntu 26.04 jobs, with one trial per PR and three per editor on main. These are separate runner hosts: compare with that limitation in mind. The report displays individual trials and medians, and includes raw JSON and evidence. Failed or incomplete inventories cannot replace the published report.
+GitHub Actions validates hardware accounting on Ubuntu 24.04 ARM64 and preserves all three pinned x64 editors in separate Ubuntu 24.04 timing jobs. Separate Ubuntu 24.04 ARM64 jobs measure instructions for the same pinned LVCE and VS Code versions. Every job runs one trial per PR and three per editor on main. Each ARM64 editor job also requires successful hardware accounting acceptance before installation. Both complete inventories, protocol tests and hardware acceptance are required before publication.
+
+The supported instruction inventory is LVCE and VS Code on native ARM64. Atom 1.60.0 has no official Linux ARM64 build, so its x64 timing results remain available but no instruction count is claimed. Hosted x64 Ubuntu 24.04/26.04 runners tested here report `<not supported>` for retired instructions, including inherited per-task capture; perf may exit zero for that unsupported event. A successful exit code alone is not an availability check. ARM64 hardware acceptance validates actual counts, descendants, cutoff and harness exclusion. No emulation, software-event estimate or zero count substitutes for unavailable hardware.
+
+Editor jobs use separate runner hosts: compare with that limitation in mind. The report labels architecture, displays individual native ARM64 instruction counts and medians separately from x64 settling times, and includes raw JSON and evidence. Failed or incomplete timing or instruction inventories cannot replace the published report.
 
 ## Run on Linux
 
-Install the packages listed in `.github/workflows/benchmark.yml`, Node 24.18.0, and Python 3.12 or newer. Passwordless sudo is needed only to enter the dedicated cgroup; the launcher immediately drops to the invoking UID/GID before starting the editor, preserving its isolated environment. Use a fresh checkout/run directory with enough space for the VS Code dependency installation and a second copy of root `node_modules`.
+Install the packages listed in `.github/workflows/benchmark.yml`, Node 24.18.0, and Python 3.12 or newer. Passwordless sudo is needed for the hardware-counter controller and to enter the dedicated cgroup; the editor launcher immediately drops to the invoking UID/GID before starting the editor, preserving its isolated environment. Run the benchmark under sudo with `PERF`, `BENCHMARK_CGROUP`, `DISPLAY` and `XAUTHORITY` passed explicitly so perf can open the cgroup counter while the editor still runs as the invoking user. Use a fresh checkout/run directory with enough space for the VS Code dependency installation and a second copy of root `node_modules`.
 
 ```sh
+sudo apt-get install linux-tools-generic
+sudo sysctl kernel.perf_event_paranoid=-1
 sudo mkdir /sys/fs/cgroup/source-control-benchmark
 sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/source-control-benchmark/cgroup.procs /sys/fs/cgroup/source-control-benchmark/cgroup.kill
 export BENCHMARK_CGROUP=/sys/fs/cgroup/source-control-benchmark
+export PERF="$(command -v perf)"
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/install.py --editors vscode
 .venv/bin/python scripts/prepare.py
-xvfb-run -a .venv/bin/python scripts/benchmark.py --editor vscode --repeats 3
+xvfb-run -a bash -c 'sudo PERF="$PERF" BENCHMARK_CGROUP="$BENCHMARK_CGROUP" DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" .venv/bin/python scripts/benchmark.py --editor vscode --repeats 3'
 python3 -m unittest discover -s tests
+sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF"
 ```
 
-Repeat with separate fresh run directories for `lvce` and `atom`; gather each editor's `results/<editor>` into one `results` directory, then run `scripts/report.py --repeats 3 --run-url URL --commit SHA`. The generated static site is `.tmp/pages`.
+Repeat the timing run with separate fresh run directories for `lvce` and `atom`. On native ARM64, repeat for `vscode` and `lvce` with `--instructions` on both `install.py` and `benchmark.py`, and run the hardware acceptance before editor measurement. Gather `results/timing/<editor>` and `results/instructions/<editor>` from all five jobs into one `results` directory, then run `scripts/report.py --repeats 3 --run-url URL --commit SHA`. The generated static site is `.tmp/pages`.
 
 No third-party repository is modified or receives a pull request. Editor installer patterns and pinned releases derive from [lvce-idle-cpu-benchmark](https://github.com/levivilet/lvce-idle-cpu-benchmark).

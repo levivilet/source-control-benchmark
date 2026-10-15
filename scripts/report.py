@@ -11,7 +11,7 @@ from protocol import CPU_PERCENT_LIMIT, QUIET_SECONDS
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def validate(results, repeats, editors, fixture):
+def validate(results, repeats, editors, fixture, instructions=True, architecture=None):
     expected = {(e['id'], n) for e in editors for n in range(1, repeats + 1)}
     observed = set()
     for result in results:
@@ -21,6 +21,21 @@ def validate(results, repeats, editors, fixture):
         observed.add(identity)
         if result['status'] != 'ok' or not result.get('deleted'):
             raise ValueError('Unsuccessful trial')
+        if architecture and result.get('host', {}).get('architecture') != architecture:
+            raise ValueError('Incorrect native architecture')
+        if instructions:
+            counter = result.get('instructionEvidence', {})
+            if (not isinstance(counter.get('instructions'), int) or counter['instructions'] <= 0 or
+                    not counter.get('rawCounter') or not counter.get('perfVersion') or not counter.get('cutoffAcknowledged') or
+                    not isinstance(counter.get('start'), dict) or not isinstance(counter.get('cutoff'), dict)):
+                raise ValueError('Missing hardware instruction evidence')
+            start = counter['start']
+            cutoff = counter['cutoff']
+            if (start.get('acknowledgedAt', 0) <= 0 or cutoff.get('acknowledgedAt', 0) < cutoff.get('requestedAt', 0) or
+                    start.get('acknowledgedAt', 0) > cutoff.get('requestedAt', 0) or
+                    start.get('latencySeconds', -1) < 0 or cutoff.get('latencySeconds', -1) < 0 or
+                    not result.get('host', {}).get('architecture')):
+                raise ValueError('Invalid hardware instruction boundaries or host architecture')
         if result['editor'] not in editors or result['fixture']['commit'] != fixture['commit']:
             raise ValueError('Incorrect provenance')
         if result['finalStatuses'] < result['baselineStatuses'] or result['baselineStatuses'] < 1:
@@ -48,6 +63,11 @@ def validate(results, repeats, editors, fixture):
         raise ValueError('Incomplete editor/trial inventory')
 
 
+def validate_inventories(timing, counts, repeats, editors, instruction_editors, fixture):
+    validate(timing, repeats, editors, fixture, instructions=False, architecture='x86_64')
+    validate(counts, repeats, instruction_editors, fixture, architecture='aarch64')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repeats', type=int, default=3)
@@ -56,14 +76,21 @@ def main():
     args = parser.parse_args()
     editors = json.loads((ROOT / 'config/editors.lock.json').read_text())
     fixture = json.loads((ROOT / 'config/fixture.json').read_text())
+    instruction_editors = json.loads((ROOT / 'config/instruction-editors.lock.json').read_text())
     files = sorted((ROOT / 'results').rglob('result.json'))
-    results = [json.loads(p.read_text()) for p in files]
-    validate(results, args.repeats, editors, fixture)
+    results = [json.loads(p.read_text()) for p in files if p.relative_to(ROOT / 'results').parts[0] == 'timing']
+    instruction_results = [json.loads(p.read_text()) for p in files if p.relative_to(ROOT / 'results').parts[0] == 'instructions']
+    if len(results) + len(instruction_results) != len(files):
+        raise ValueError('Unexpected result inventory')
+    validate_inventories(results, instruction_results, args.repeats, editors, instruction_editors, fixture)
     output = ROOT / '.tmp/pages'
     output.mkdir(parents=True, exist_ok=True)
     shutil.copytree(ROOT / 'results', output / 'evidence', dirs_exist_ok=True)
-    (output / 'results.json').write_text(json.dumps({'runUrl': args.run_url, 'commit': args.commit, 'results': results}, indent=2))
+    (output / 'results.json').write_text(json.dumps({'runUrl': args.run_url, 'commit': args.commit, 'results': results, 'instructionResults': instruction_results}, indent=2))
     medians = {e['id']: statistics.median(r['totalSeconds'] for r in results if r['editor']['id'] == e['id']) for e in editors}
+    instruction_medians = {e['id']: statistics.median(r['instructionEvidence']['instructions']
+                                                        for r in instruction_results if r['editor']['id'] == e['id'])
+                           for e in instruction_editors}
     maximum = max(medians.values()) * 1.2
     svg = ['<svg viewBox="0 0 900 440" role="img" aria-label="Median source-control settling time in seconds">']
     for tick in range(5):
@@ -75,15 +102,15 @@ def main():
         y = 350 - 280 * value / maximum
         svg.append(f'<line x1="{x}" x2="{x}" y1="350" y2="{y}" stroke="#1763aa"/><circle cx="{x}" cy="{y}" r="6" fill="#1763aa"/><text x="{x}" y="{y-16}" text-anchor="middle">{value:.3f} s</text><text x="{x}" y="395" text-anchor="middle">{html.escape(editor["name"])}</text>')
     svg.append('</svg>')
-    rows = ''.join(f'<tr><td>{html.escape(r["editor"]["name"])}</td><td>{html.escape(r["editor"]["version"])}</td><td>{r["trial"]}</td><td>{r["deletionSeconds"]:.3f}</td><td>{r["afterDeletionSeconds"]:.3f}</td><td>{r["totalSeconds"]:.3f}</td><td>{"Observed" if r["refreshObserved"] else "Not observed"}</td></tr>' for r in results)
     page = f'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Source-control benchmark</title>
 <style>body{{font:16px/1.6 system-ui;background:#f4f7fa;color:#142b43;margin:40px auto;padding:0 24px;max-width:1100px}}svg{{width:100%;background:white;border:1px solid #ccd7e5;border-radius:8px}}text{{font:16px system-ui;fill:#142b43}}aside{{background:#e6f0fa;padding:20px;border-radius:8px}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{text-align:left;padding:10px;border-bottom:1px solid #ccd7e5}}a{{color:#1763aa}}.scroll{{overflow:auto}}</style>
 <h1>Source-control benchmark</h1><p>VS Code 1.139.0 repository, installed dependencies, clean source control, then deletion of root node_modules.</p>
 <p>Complete run: <a href="{html.escape(args.run_url, quote=True)}">GitHub Actions</a> · benchmark commit {html.escape(args.commit)}</p>
-<aside>This measures an observable settling bound: deletion start to a clean source-control view, no Git activity and three seconds of editor process-tree CPU at or below 5% of one logical CPU. It includes deletion and the quiet window. Cgroup v2 accounts for the editor and all descendants, including short-lived Git processes. This operational idle threshold does not prove every internal queue is empty. Lower is faster under this protocol. Missing CPU evidence, crashes and timeouts fail publication. Editors that ignore this directory may perform no Git refresh; that is explicitly reported and is never assigned a zero duration.</aside>
-<p>All three editors completed {args.repeats} trials each. Each trial restores the same installed dependency tree and uses a fresh isolated profile. Fixture revision: {fixture['commit']}.</p>
+<aside>This measures an observable settling bound: deletion start to a clean source-control view, no Git activity and three seconds of editor process-tree CPU at or below 5% of one logical CPU. It includes deletion and the quiet window. Cgroup v2 accounts for the editor and all descendants, including short-lived Git processes. Native ARM64 hardware instructions are measured in separate trials over that same acknowledged interval using perf's cgroup filter; the harness, deletion process, X server, desktop, setup and cleanup are excluded. Instruction counts are architecture and machine dependent. This operational idle threshold does not prove every internal queue is empty. Lower is faster under this protocol. Missing or multiplexed hardware counters, missing CPU evidence, crashes and timeouts fail publication. Editors that ignore this directory may perform no Git refresh; that is explicitly reported and is never assigned a zero duration.</aside>
+<p>All three x64 editors completed {args.repeats} timing trials each. LVCE and VS Code also completed {args.repeats} native ARM64 instruction trials each. Atom 1.60.0 has no official Linux ARM64 build and is timing-only; x64 hosted runners expose no usable instruction event. No emulated or zero-valued instruction results are substituted. Each trial restores the same installed dependency tree and uses a fresh isolated profile. Fixture revision: {fixture['commit']}.</p>
 <h2>Median settling time (seconds)</h2>{''.join(svg)}
-<h2>Individual trials</h2><div class="scroll"><table><thead><tr><th>Editor</th><th>Version</th><th>Trial</th><th>Deletion (s)</th><th>After deletion (s)</th><th>Total (s)</th><th>Automatic Git refresh</th></tr></thead><tbody>{rows}</tbody></table></div>
+<h2>Median retired instructions</h2><p>Median over {args.repeats} native ARM64 trials per supported editor. Atom is unavailable on ARM64. These are separate runs from the x64 timing comparison. A larger count is more instructions retired during the measured deletion and settling interval; counts are not directly comparable across processor architectures or different hosts.</p><div class="scroll"><table><thead><tr><th>Editor</th><th>Median instructions</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(e["name"])}</td><td>{instruction_medians[e["id"]]:,}</td></tr>' for e in instruction_editors)}</tbody></table></div>
+<h2>Individual trials</h2><div class="scroll"><table><thead><tr><th>Editor</th><th>Architecture</th><th>Version</th><th>Trial</th><th>Deletion (s)</th><th>After deletion (s)</th><th>Total (s)</th><th>Instructions</th><th>Automatic Git refresh</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(r["editor"]["name"])}</td><td>{html.escape(r["host"]["architecture"])}</td><td>{html.escape(r["editor"]["version"])}</td><td>{r["trial"]}</td><td>{r["deletionSeconds"]:.3f}</td><td>{r["afterDeletionSeconds"]:.3f}</td><td>{r["totalSeconds"]:.3f}</td><td>{format(r['instructionEvidence']['instructions'], ',') if 'instructionEvidence' in r else 'Timing only'}</td><td>{"Observed" if r["refreshObserved"] else "Not observed"}</td></tr>' for r in results + instruction_results)}</tbody></table></div>
 <p><a href="results.json">Download raw measurements and provenance</a>. Evidence includes per-trial screenshots, Git traces, UI observations and logs.</p>
 <ul>{''.join(f'<li><a href="evidence/{p.relative_to(ROOT / "results").as_posix()}">{html.escape(p.relative_to(ROOT / "results").as_posix())}</a></li>' for p in files)}</ul>
 </html>'''
