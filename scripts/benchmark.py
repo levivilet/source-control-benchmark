@@ -81,6 +81,8 @@ def trial(editor, number, snapshot):
             os.chown(path, editor_uid, editor_gid)
         editor_user = pwd.getpwuid(editor_uid)
         env.update(HOME=editor_user.pw_dir, USER=editor_user.pw_name, LOGNAME=editor_user.pw_name)
+        trace.touch()
+        os.chown(trace, editor_uid, editor_gid)
     with socket.socket() as port_socket:
         port_socket.bind(('127.0.0.1', 0))
         port = port_socket.getsockname()[1]
