@@ -63,7 +63,10 @@ jobs:
             xvfb xauth openbox libgtk-3-0 libnss3 libgbm1 libxss1 libxtst6 \
             libxkbcommon-x11-0 libasound2t64
           sudo sysctl kernel.perf_event_paranoid=-1
-          PERF=$(find -L /usr/lib/linux-tools -name perf -type f | sort | tail -n 1)
+          PERF=$(command -v perf || true)
+          if [[ -z "$PERF" ]]; then
+            PERF=$(find -L /usr/lib/linux-tools* -name perf -type f | sort | tail -n 1)
+          fi
           test -n "$PERF"
           echo "PERF=$PERF" >> "$GITHUB_ENV"
           python3 -m venv .venv
