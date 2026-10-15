@@ -142,40 +142,26 @@ def trial(editor, number, snapshot, instructions=False):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('LVCE workspace did not initialize Git')
                 time.sleep(.25)
-            # Record setup-only input delivery for CI navigation diagnostics.
-            page.evaluate("""window.benchmarkKeys = [];
-                window.benchmarkKeyListener = event => window.benchmarkKeys.push({
-                    key: event.key, code: event.code, ctrl: event.ctrlKey,
-                    shift: event.shiftKey, target: event.target.tagName});
-                window.addEventListener('keydown', window.benchmarkKeyListener, true);""")
-            navigation = []
-            # Git initialization can precede keyboard routing/initial layout restore.
-            # Reissue this idempotent focus command only during setup, and stop as
-            # soon as the SCM view exists. Never send it during measurement.
-            for attempt in range(3):
-                navigation.append({'attempt': attempt, 'beforeFocus': page.evaluate('document.hasFocus()')})
-                page.call('Page.bringToFront')
-                page.key('g', 'KeyG', 10)
-                opened = False
-                for _ in range(20):
-                    opened = page.evaluate("!!document.querySelector('.SourceControl textarea')")
-                    if opened:
-                        break
-                    if process.poll() is not None:
-                        raise RuntimeError('LVCE exited while opening source control')
-                    time.sleep(.25)
-                if opened:
-                    break
-            navigation.append(page.evaluate("""({
-                focused: document.hasFocus(), events: window.benchmarkKeys,
-                activeElement: document.activeElement.tagName,
-                opened: !!document.querySelector('.SourceControl textarea')
-            })"""))
+            # Git startup can finish before the initial Explorer restore has rendered.
+            # Complete that visible setup state before requesting a different sidebar.
+            while not page.evaluate("!!document.querySelector('.Explorer .TreeItem')"):
+                if process.poll() is not None:
+                    raise RuntimeError('LVCE exited during initial Explorer restore')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('LVCE initial Explorer did not render')
+                time.sleep(.25)
+            navigation = {'explorerReady': True, 'method': 'native Source Control click'}
+            page.call('Page.bringToFront')
+            navigation['clicked'] = page.click('.ActivityBarItem[title="Source Control"]')
             (output / 'navigation.json').write_text(json.dumps(navigation, indent=2))
-            page.evaluate("""window.removeEventListener('keydown', window.benchmarkKeyListener, true);
-                delete window.benchmarkKeyListener; delete window.benchmarkKeys;""")
-            if not opened:
-                raise TimeoutError('LVCE source-control view did not open')
+            if not navigation['clicked']:
+                raise RuntimeError('LVCE source-control activity item was not visible')
+            while not page.evaluate("!!document.querySelector('.SourceControl textarea')"):
+                if process.poll() is not None:
+                    raise RuntimeError('LVCE exited while opening source control')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('LVCE source-control view did not open')
+                time.sleep(.25)
         else:
             selector = ('[role="tab"][aria-label^="Source Control"]' if editor['id'] == 'vscode'
                         else '.ActivityBarItem[title="Source Control"]')
