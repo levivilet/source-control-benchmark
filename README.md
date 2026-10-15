@@ -21,7 +21,7 @@ GitHub Actions first validates the hardware accounting boundary on Ubuntu 24.04 
 Install the packages listed in `.github/workflows/benchmark.yml`, Node 24.18.0, and Python 3.12 or newer. Passwordless sudo is needed only to enter the dedicated cgroup; the launcher immediately drops to the invoking UID/GID before starting the editor, preserving its isolated environment. Use a fresh checkout/run directory with enough space for the VS Code dependency installation and a second copy of root `node_modules`.
 
 ```sh
-sudo apt-get install linux-tools-generic
+sudo apt-get install linux-perf linux-tools-generic
 sudo sysctl kernel.perf_event_paranoid=-1
 sudo mkdir /sys/fs/cgroup/source-control-benchmark
 sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/source-control-benchmark/cgroup.procs /sys/fs/cgroup/source-control-benchmark/cgroup.kill
