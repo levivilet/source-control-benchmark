@@ -251,6 +251,7 @@ def trial(editor, number, snapshot, instructions=False):
                 pass
     finally:
         if page:
+            page.save_diagnostics(output / 'browser.json')
             page.close()
         stop(process)
         (group / 'cgroup.kill').write_text('1')

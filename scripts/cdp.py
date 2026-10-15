@@ -17,6 +17,14 @@ class Page:
                               and (url_suffix is None or t['url'].split('?')[0].endswith(url_suffix)))
                 self.socket = websocket.create_connection(target['webSocketDebuggerUrl'], timeout=5, suppress_origin=True)
                 self.counter = 0
+                self.diagnostics = []
+                self.requests = {}
+                for domain in ['Runtime', 'Log', 'Network']:
+                    try:
+                        self.call(domain + '.enable')
+                    except RuntimeError as error:
+                        # Atom's older CDP may lack a diagnostic domain.
+                        self.diagnostics.append({'method': domain + '.enable', 'error': str(error)})
                 return
             except (OSError, StopIteration):
                 if time.monotonic() >= deadline:
@@ -28,10 +36,34 @@ class Page:
         self.socket.send(json.dumps({'id': self.counter, 'method': method, 'params': params}))
         while True:
             message = json.loads(self.socket.recv())
+            if 'method' in message:
+                self.record_event(message)
             if message.get('id') == self.counter:
                 if 'error' in message:
                     raise RuntimeError(message['error'])
                 return message['result']
+
+    def record_event(self, message):
+        method = message['method']
+        params = message.get('params', {})
+        if method == 'Network.requestWillBeSent':
+            self.requests[params['requestId']] = params['request']['url']
+            if len(self.requests) > 1000:
+                self.requests.pop(next(iter(self.requests)))
+        if method == 'Network.loadingFailed':
+            message['url'] = self.requests.pop(params['requestId'], None)
+        elif method == 'Network.loadingFinished':
+            self.requests.pop(params['requestId'], None)
+        interesting = method in ['Runtime.exceptionThrown', 'Runtime.consoleAPICalled',
+                                 'Log.entryAdded', 'Network.loadingFailed']
+        if method == 'Network.responseReceived':
+            interesting = params['response']['status'] >= 400
+        if interesting and len(self.diagnostics) < 500:
+            encoded = json.dumps(message)
+            self.diagnostics.append(message if len(encoded) < 16000 else {'truncated': encoded[:16000]})
+
+    def save_diagnostics(self, path):
+        path.write_text(json.dumps(self.diagnostics, indent=2))
 
     def evaluate(self, expression):
         result = self.call('Runtime.evaluate', expression=expression, returnByValue=True, awaitPromise=True)
