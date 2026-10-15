@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from protocol import Completion, trace_state
-from report import validate
+from report import validate, validate_inventories
 from counters import parse_counter
 
 
@@ -80,11 +80,6 @@ class ProtocolTest(unittest.TestCase):
 
 
 class CounterTest(unittest.TestCase):
-    def test_task_counter_has_no_cgroup_column(self):
-        self.assertEqual(parse_counter('12345;;instructions;1000000;100.00;;\n', cgroup=False), 12345)
-        with self.assertRaises(ValueError):
-            parse_counter('12345;;instructions;1000000;50.00;;\n', cgroup=False)
-
     def test_parses_single_fully_scheduled_instruction_count(self):
         self.assertEqual(parse_counter('12345;;instructions;;1000000;100.00\n'), 12345)
 
@@ -110,6 +105,24 @@ class ReportTest(unittest.TestCase):
                              totalSeconds=5, deletionSeconds=1, afterDeletionSeconds=4, refreshObserved=True,
                              cpuEvidence=[dict(seconds=i*.25, cpuPercent=.5, ready=True, activeGit=0, traceLines=20) for i in range(13)])
                         for editor in self.editors]
+
+    def test_both_native_inventories_are_required(self):
+        timing = copy.deepcopy(self.results)
+        for result in timing:
+            del result['instructionEvidence']
+        counts = copy.deepcopy(self.results[:2])
+        for result in counts:
+            result['host']['architecture'] = 'aarch64'
+        def check(timing, counts):
+            validate_inventories(timing, counts, 1, self.editors, self.editors[:2], self.fixture)
+        check(timing, counts)
+        for bad_timing, bad_counts in [(timing[:-1], counts), (timing, counts[:-1]),
+                                       (timing, timing[:2]), (timing, counts + [counts[0]])]:
+            with self.assertRaises(ValueError):
+                check(bad_timing, bad_counts)
+        del counts[0]['instructionEvidence']
+        with self.assertRaises(ValueError):
+            check(timing, counts)
 
     def test_complete_inventory(self):
         validate(self.results, 1, self.editors, self.fixture)

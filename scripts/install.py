@@ -55,8 +55,9 @@ def extract(entry, archive, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--editors", default=None, help="comma-separated editor ids")
+    parser.add_argument('--instructions', action='store_true', help='use native ARM64 instruction inventory')
     args = parser.parse_args()
-    entries = json.loads(LOCK.read_text())
+    entries = json.loads((ROOT / 'config/instruction-editors.lock.json' if args.instructions else LOCK).read_text())
     by_id = {entry["id"]: entry for entry in entries}
     ids = list(by_id) if args.editors is None else args.editors.split(",")
     if not ids or len(ids) != len(set(ids)) or set(ids) - by_id.keys():

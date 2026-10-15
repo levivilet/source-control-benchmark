@@ -1,8 +1,6 @@
 """Measure hardware instructions for tasks in a dedicated cgroup."""
 import errno
 import os
-import json
-import sys
 from pathlib import Path
 import select
 import signal
@@ -11,15 +9,14 @@ import time
 import uuid
 
 
-def parse_counter(raw, cgroup=True):
+def parse_counter(raw):
     rows = [line.split(';') for line in raw.splitlines()
             if len(line.split(';')) >= 6 and line.split(';')[2].strip() == 'instructions']
     if len(rows) != 1:
         raise ValueError('expected exactly one instruction count')
     row = rows[0]
-    runtime_column = 4 if cgroup else 3
     try:
-        count, runtime, running = int(row[0]), int(row[runtime_column]), float(row[runtime_column + 1])
+        count, runtime, running = int(row[0]), int(row[4]), float(row[5])
     except ValueError as error:
         raise ValueError('unsupported or uncounted hardware instructions') from error
     if count <= 0 or runtime <= 0 or not 99.9 <= running <= 100:
@@ -28,10 +25,7 @@ def parse_counter(raw, cgroup=True):
 
 
 class Capture:
-    def __init__(self, perf, directory, group=None, create_group=False, mode="cgroup"):
-        if mode not in ("cgroup", "task"):
-            raise ValueError("unknown instruction capture mode")
-        self.mode = mode
+    def __init__(self, perf, directory, group=None, create_group=False):
         self.directory = Path(directory)
         self.perf = perf
         self.group = Path(group) if group else Path('/sys/fs/cgroup') / ('source-control-' + uuid.uuid4().hex)
@@ -54,21 +48,15 @@ class Capture:
                 os.mkfifo(path)
                 self.fds.append(os.open(path, os.O_RDWR | os.O_NONBLOCK))
             self.log = (self.directory / 'perf.log').open('w')
-            if self.mode == "cgroup":
-                self.open_counter(["-a", "-G", self.group.name])
+            self.process = subprocess.Popen([
+                self.perf, 'stat', '-a', '-e', 'instructions', '-G', self.group.name,
+                '-x', ';', '-D', '-1', '--control', f'fd:{self.fds[0]},{self.fds[1]}',
+            ], pass_fds=tuple(self.fds), stdout=subprocess.DEVNULL, stderr=self.log,
+                start_new_session=True)
             return self
         except BaseException:
             self.__exit__(None, None, None)
             raise
-
-    def open_counter(self, scope):
-        self.process = subprocess.Popen([
-            self.perf, "stat", "-e", "instructions", *scope,
-            "-x", ";", "-D", "-1", "--control", f"fd:{self.fds[0]},{self.fds[1]}",
-        ], pass_fds=tuple(self.fds), stdout=subprocess.DEVNULL, stderr=self.log,
-            start_new_session=True)
-        # Attaching must finish before the gated launcher can fork or exec.
-        self.control("ping")
 
     def control(self, command):
         before = time.monotonic()
@@ -103,8 +91,8 @@ class Capture:
         raw = (self.directory / 'perf.log').read_text()
         if status not in (0, -signal.SIGINT):
             raise RuntimeError(f'perf exited with status {status}: {raw}')
-        return {'instructions': parse_counter(raw, cgroup=self.mode == 'cgroup'), 'rawCounter': raw,
-                'source': 'perf stat instructions, ' + self.mode, 'perfVersion': self.perf_version,
+        return {'instructions': parse_counter(raw), 'rawCounter': raw,
+                'source': 'perf stat instructions, cgroup v2', 'perfVersion': self.perf_version,
                 'start': self.started, 'cutoff': self.stopped,
                 'cutoffAcknowledged': True}
 
@@ -115,18 +103,9 @@ class Capture:
                 os.setgroups([])
                 os.setgid(int(environment['SUDO_GID']))
                 os.setuid(int(environment['SUDO_UID']))
-        actual = command
-        if self.mode == 'task':
-            actual = [sys.executable, '-c',
-                      'import json,os,sys; cmd=json.load(sys.stdin); os.execvpe(cmd[0],cmd,os.environ)']
-        child = subprocess.Popen(actual, cwd=cwd, env=environment, stdout=stdout, stderr=stderr,
-                                 stdin=subprocess.PIPE if self.mode == 'task' else None,
+        child = subprocess.Popen(command, cwd=cwd, env=environment, stdout=stdout, stderr=stderr,
                                  preexec_fn=enter_group, start_new_session=True)
         self.children.append(child)
-        if self.mode == 'task':
-            self.open_counter(['-p', str(child.pid)])
-            child.stdin.write(json.dumps(command).encode())
-            child.stdin.close()
         return child
 
     def __exit__(self, *args):

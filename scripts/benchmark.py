@@ -1,5 +1,6 @@
 """Measure natural source-control refresh after deleting ignored dependencies."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -56,8 +57,8 @@ def stop(process):
         process.wait(timeout=5)
 
 
-def trial(editor, number, snapshot):
-    output = ROOT / 'results' / editor['id'] / str(number)
+def trial(editor, number, snapshot, instructions=False):
+    output = ROOT / 'results' / ('instructions' if instructions else 'timing') / editor['id'] / str(number)
     output.mkdir(parents=True)
     profile = ROOT / '.tmp' / f"profile-{editor['id']}-{number}"
     profile.mkdir()
@@ -200,13 +201,14 @@ def trial(editor, number, snapshot):
         result['baselineStatuses'] = statuses
         # The harness's own git validation never receives GIT_TRACE2_EVENT.
         clean()
-        perf = os.environ['PERF']
-        counter_dir.mkdir()
+        if instructions:
+            counter_dir.mkdir()
         wall_started = time.time()
         completion = Completion(0, 0, require_status=False)
-        with Capture(perf, counter_dir, group=group) as counters:
-            counters.start()
-            started = counters.started['acknowledgedAt']
+        with (Capture(os.environ['PERF'], counter_dir, group=group) if instructions else nullcontext()) as counters:
+            if counters:
+                counters.start()
+            started = counters.started['acknowledgedAt'] if counters else time.monotonic()
             completion.started = started
             wall_started = time.time()
             shutil.rmtree(modules)
@@ -228,8 +230,9 @@ def trial(editor, number, snapshot):
                                       statuses=statuses, errors=errors, count=count, cpu_percent=cpu_percent):
                     break
                 time.sleep(.25)
-            counters.cutoff()
-            result['instructionEvidence'] = counters.finish()
+            if counters:
+                counters.cutoff()
+                result['instructionEvidence'] = counters.finish()
         clean()
         page.screenshot(output / 'after.png')
         result.update(status='ok', totalSeconds=now - started, afterDeletionSeconds=now - deleted,
@@ -261,15 +264,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--editor', choices=list(STATE), required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--instructions', action='store_true', help='measure hardware instructions on ARM64')
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error('repeats must be positive')
-    editor = next(e for e in json.loads((ROOT / 'config/editors.lock.json').read_text()) if e['id'] == args.editor)
+    expected_arch = 'aarch64' if args.instructions else 'x86_64'
+    if platform.machine() != expected_arch:
+        parser.error(f'expected native {expected_arch} runner')
+    lock = 'instruction-editors.lock.json' if args.instructions else 'editors.lock.json'
+    entries = json.loads((ROOT / 'config' / lock).read_text())
+    if args.editor not in {e['id'] for e in entries}:
+        parser.error('editor is unavailable in the selected native inventory')
+    editor = next(e for e in entries if e['id'] == args.editor)
     snapshot = ROOT / '.tmp/dependencies'
     if snapshot.exists():
         raise RuntimeError('Use a fresh run directory; dependency snapshot already exists')
     shutil.copytree(FIXTURE / 'node_modules', snapshot, symlinks=True)
-    results = [trial(editor, number, snapshot) for number in range(1, args.repeats + 1)]
+    results = [trial(editor, number, snapshot, args.instructions) for number in range(1, args.repeats + 1)]
     for result in results:
         print(result['editor']['name'], result['trial'], result['status'], result.get('error', result.get('totalSeconds')))
     if any(r['status'] != 'ok' for r in results):
