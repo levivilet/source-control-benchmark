@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -24,7 +25,7 @@ int main(int argc, char **argv) {
   const char *done = argv[4];
   const char *release = argv[5];
   uint64_t before = strtoull(argv[6], NULL, 10);
-  int detached = mode[0] == 'd';
+  int detached = strcmp(mode, "descendant") == 0;
   pid_t child = detached ? fork() : 0;
   if (child < 0) return 3;
   if (detached && child > 0) {
@@ -44,6 +45,6 @@ int main(int argc, char **argv) {
   if (!file) return 6;
   fclose(file);
   wait_for(release);
-  loop(before * 10);
+  if (strcmp(mode, "direct") != 0) loop(before * 10);
   return 0;
 }

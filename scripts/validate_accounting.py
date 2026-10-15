@@ -9,13 +9,13 @@ import time
 from counters import Capture
 
 
-def measure(perf, mode, harness=False):
+def measure(perf, mode, harness=False, counter_mode="cgroup"):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         if 'SUDO_UID' in os.environ:
             os.chown(root, int(os.environ['SUDO_UID']), int(os.environ['SUDO_GID']))
         try:
-            with Capture(perf, root) as capture:
+            with Capture(perf, root, mode=counter_mode) as capture:
                 (root / 'ready').unlink(missing_ok=True)
                 with (root / 'stdout').open('w') as stdout, (root / 'stderr').open('w') as stderr:
                     child = capture.launch([
@@ -54,10 +54,13 @@ def main():
     Path('results').mkdir(exist_ok=True)
     Path('.tmp').mkdir(exist_ok=True)
     subprocess.run(['cc', '-O2', 'tests/workload.c', '-o', '.tmp/instruction-workload'], check=True)
-    results = {'direct': measure(sys.argv[1], 'direct'),
-               'descendant': measure(sys.argv[1], 'descendant'),
-               'harness': measure(sys.argv[1], 'direct', harness=True),
-               'postCutoff': measure(sys.argv[1], 'direct')}
+    counter_mode = sys.argv[2] if len(sys.argv) > 2 else 'cgroup'
+    def run(mode, harness=False):
+        return measure(sys.argv[1], mode, harness, counter_mode)
+    results = {'direct': run('direct'),
+               'descendant': run('descendant'),
+               'harness': run('direct', harness=True),
+               'postCutoff': run('postCutoff')}
     baseline = results['direct']['instructions']
     for name, result in results.items():
         result['ratioToDirect'] = result['instructions'] / baseline

@@ -80,6 +80,11 @@ class ProtocolTest(unittest.TestCase):
 
 
 class CounterTest(unittest.TestCase):
+    def test_task_counter_has_no_cgroup_column(self):
+        self.assertEqual(parse_counter('12345;;instructions;1000000;100.00;;\n', cgroup=False), 12345)
+        with self.assertRaises(ValueError):
+            parse_counter('12345;;instructions;1000000;50.00;;\n', cgroup=False)
+
     def test_parses_single_fully_scheduled_instruction_count(self):
         self.assertEqual(parse_counter('12345;;instructions;;1000000;100.00\n'), 12345)
 

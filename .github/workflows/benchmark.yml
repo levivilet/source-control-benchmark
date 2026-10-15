@@ -36,6 +36,35 @@ jobs:
           name: instruction-accounting
           path: results/
           if-no-files-found: error
+  task-accounting-probe:
+    name: Task accounting probe (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-generic build-essential
+          sudo sysctl kernel.perf_event_paranoid=-1
+          PERF=$(command -v perf)
+          mkdir -p results/cgroup-comparison
+          set +e
+          sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF"
+          cgroup_status=$?
+          set -e
+          echo "$cgroup_status" > results/cgroup-comparison/exit-status.txt
+          sudo mv results/accounting* results/cgroup-comparison/ || true
+          sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF" task
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: task-accounting-${{ matrix.runner }}
+          path: results/
+          if-no-files-found: error
   test:
     name: Protocol tests
     runs-on: ubuntu-26.04
@@ -97,7 +126,7 @@ jobs:
           retention-days: 30
   report:
     name: Validate report
-    needs: [accounting, test, benchmark]
+    needs: [accounting, task-accounting-probe, test, benchmark]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     steps:
@@ -105,9 +134,10 @@ jobs:
       - name: Require hardware accounting, all editors and protocol tests
         env:
           ACCOUNTING_RESULT: ${{ needs.accounting.result }}
+          TASK_ACCOUNTING_RESULT: ${{ needs.task-accounting-probe.result }}
           TEST_RESULT: ${{ needs.test.result }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
-        run: test "$ACCOUNTING_RESULT" = success && test "$TEST_RESULT" = success && test "$BENCHMARK_RESULT" = success
+        run: test "$ACCOUNTING_RESULT" = success && test "$TASK_ACCOUNTING_RESULT" = success && test "$TEST_RESULT" = success && test "$BENCHMARK_RESULT" = success
       - uses: actions/download-artifact@v5
         with:
           pattern: source-control-*
