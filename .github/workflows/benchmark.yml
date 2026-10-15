@@ -24,7 +24,10 @@ jobs:
           mkdir -p .tmp
       - name: Validate instruction counter boundaries
         run: |
-          PERF=$(find -L /usr/lib/linux-tools -name perf -type f | sort | tail -n 1)
+          PERF=$(command -v perf || true)
+          if [[ -z "$PERF" ]]; then
+            PERF=$(find -L /usr/lib/linux-tools* -name perf -type f | sort | tail -n 1)
+          fi
           test -n "$PERF"
           sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF"
       - uses: actions/upload-artifact@v5
