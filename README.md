@@ -18,7 +18,7 @@ GitHub Actions first validates the hardware accounting boundary on Ubuntu 24.04 
 
 ## Run on Linux
 
-Install the packages listed in `.github/workflows/benchmark.yml`, Node 24.18.0, and Python 3.12 or newer. Passwordless sudo is needed only to enter the dedicated cgroup; the launcher immediately drops to the invoking UID/GID before starting the editor, preserving its isolated environment. Use a fresh checkout/run directory with enough space for the VS Code dependency installation and a second copy of root `node_modules`.
+Install the packages listed in `.github/workflows/benchmark.yml`, Node 24.18.0, and Python 3.12 or newer. Passwordless sudo is needed for the hardware-counter controller and to enter the dedicated cgroup; the editor launcher immediately drops to the invoking UID/GID before starting the editor, preserving its isolated environment. Run the benchmark under sudo with `PERF`, `BENCHMARK_CGROUP`, `DISPLAY` and `XAUTHORITY` passed explicitly so perf can open the cgroup counter while the editor still runs as the invoking user. Use a fresh checkout/run directory with enough space for the VS Code dependency installation and a second copy of root `node_modules`.
 
 ```sh
 sudo apt-get install linux-perf linux-tools-generic
@@ -31,7 +31,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/install.py --editors vscode
 .venv/bin/python scripts/prepare.py
-xvfb-run -a .venv/bin/python scripts/benchmark.py --editor vscode --repeats 3
+xvfb-run -a bash -c 'sudo PERF="$PERF" BENCHMARK_CGROUP="$BENCHMARK_CGROUP" DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" .venv/bin/python scripts/benchmark.py --editor vscode --repeats 3'
 python3 -m unittest discover -s tests
 sudo env LC_ALL=C python3 scripts/validate_accounting.py "$PERF"
 ```

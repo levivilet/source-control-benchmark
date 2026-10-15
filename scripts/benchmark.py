@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import shutil
 import signal
 import socket
@@ -73,6 +74,13 @@ def trial(editor, number, snapshot):
         'workbench.startupEditor': 'none', 'security.workspace.trust.enabled': False,
         'git.autofetch': False, 'extensions.autoUpdate': False, 'update.mode': 'none',
     }))
+    editor_uid = int(os.environ.get('SUDO_UID', os.getuid()))
+    editor_gid = int(os.environ.get('SUDO_GID', os.getgid()))
+    if os.geteuid() == 0 and editor_uid != 0:
+        for path in [profile, *profile.rglob('*')]:
+            os.chown(path, editor_uid, editor_gid)
+        editor_user = pwd.getpwuid(editor_uid)
+        env.update(HOME=editor_user.pw_dir, USER=editor_user.pw_name, LOGNAME=editor_user.pw_name)
     with socket.socket() as port_socket:
         port_socket.bind(('127.0.0.1', 0))
         port = port_socket.getsockname()[1]
@@ -104,10 +112,11 @@ def trial(editor, number, snapshot):
                               completion='clean SCM + idle Git trace + editor cgroup CPU below threshold for quiet window')
     process = page = None
     observations = []
+    counter_dir = output / 'counters'
     try:
         with (output / 'editor.log').open('w') as log:
             launch = ['sudo', '-n', sys.executable, str(ROOT / 'scripts/launch.py'),
-                      str(group), str(os.getuid()), str(os.getgid()), *command]
+                      str(group), str(editor_uid), str(editor_gid), *command]
             process = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=log, stderr=log, start_new_session=True)
             process.stdin.write(json.dumps(env).encode())
             process.stdin.close()
@@ -190,7 +199,6 @@ def trial(editor, number, snapshot):
         # The harness's own git validation never receives GIT_TRACE2_EVENT.
         clean()
         perf = os.environ['PERF']
-        counter_dir = output / 'counters'
         counter_dir.mkdir()
         wall_started = time.time()
         completion = Completion(0, 0, require_status=False)
@@ -227,6 +235,9 @@ def trial(editor, number, snapshot):
                       refreshObserved=statuses > 0, cpuEvidence=[o for o in observations if 'seconds' in o and o['seconds'] >= completion.quiet_since - started])
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
+        perf_log = counter_dir / 'perf.log'
+        if perf_log.exists():
+            result['instructionFailureLog'] = perf_log.read_text()
         if page:
             try:
                 page.screenshot(output / 'failure.png')

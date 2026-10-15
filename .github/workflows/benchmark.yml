@@ -85,7 +85,7 @@ jobs:
         run: |
           repeats=3
           if [[ '${{ github.event_name }}' == pull_request ]]; then repeats=1; fi
-          xvfb-run -a bash -c 'openbox >/dev/null 2>&1 & exec .venv/bin/python scripts/benchmark.py --editor "$1" --repeats "$2"' _ '${{ matrix.editor }}' "$repeats"
+          xvfb-run -a bash -c 'openbox >/dev/null 2>&1 & exec sudo PERF="$PERF" BENCHMARK_CGROUP="$BENCHMARK_CGROUP" DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" .venv/bin/python scripts/benchmark.py --editor "$1" --repeats "$2"' _ '${{ matrix.editor }}' "$repeats"
       - uses: actions/upload-artifact@v5
         if: always()
         with:
